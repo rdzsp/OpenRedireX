@@ -6,6 +6,7 @@ import argparse
 import sys
 import socket
 from aiohttp import ClientConnectorError, ClientOSError, ServerDisconnectedError, ServerTimeoutError, ServerConnectionError, TooManyRedirects
+from tqdm import tqdm
 import concurrent.futures
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from typing import List
@@ -59,7 +60,7 @@ redirect_payloads = [
 "////%5cexample.com",
 "/////example.com",
 "/////example.com/",
-"////\\;@example.com",
+"////\;@example.com",
 "////example.com/"
 ]
 
@@ -104,10 +105,10 @@ async def fetch_url(session, url):
         async with session.head(url, allow_redirects=True, timeout=10) as response:
             return response
     except (ClientConnectorError, ClientOSError, ServerDisconnectedError, ServerTimeoutError, ServerConnectionError, TooManyRedirects, UnicodeDecodeError, socket.gaierror, asyncio.exceptions.TimeoutError):
-        print(f'[ERROR] Error fetching: {url}', file=sys.stderr)
+        tqdm.write(f'[ERROR] Error fetching: {url}', file=sys.stderr)
         return None
 
-async def process_url(semaphore, session, url, payloads, keyword):
+async def process_url(semaphore, session, url, payloads, keyword, pbar):
     async with semaphore:
         for payload in payloads:
             filled_url = url.replace(keyword, payload)
@@ -116,26 +117,33 @@ async def process_url(semaphore, session, url, payloads, keyword):
                 locations = " --> ".join(str(r.url) for r in response.history)
                 # If the string contains "-->", print in green
                 if "-->" in locations:
-                    print(f'{DARK_GREEN}[FOUND]{ENDC} {LIGHT_GREEN}{filled_url} redirects to {locations}{ENDC}')
+                    tqdm.write(f'{DARK_GREEN}[FOUND]{ENDC} {LIGHT_GREEN}{filled_url} redirects to {locations}{ENDC}')
                 else:
-                    print(f'[INFO] {filled_url} redirects to {locations}')
+                    tqdm.write(f'[INFO] {filled_url} redirects to {locations}')
+            pbar.update()
+
+async def process_urls(semaphore, session, urls, payloads, keyword):
+    with tqdm(total=len(urls) * len(payloads), ncols=70, desc='Processing', unit='url', position=0) as pbar:
+        tasks = []
+        for url in urls:
+            tasks.append(process_url(semaphore, session, url, payloads, keyword, pbar))
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 async def main(args):
     payloads = await load_payloads(args.payloads)
-    keyword = args.keyword
-    url = fuzzify_url(args.url, keyword)
-    print(f'[INFO] Processing URL with {len(payloads)} payloads.')
+    urls = load_urls()
+    tqdm.write(f'[INFO] Processing {len(urls)} URLs with {len(payloads)} payloads.')
     async with aiohttp.ClientSession() as session:
         semaphore = asyncio.Semaphore(args.concurrency)
-        await process_url(semaphore, session, url, payloads, keyword)
+        await process_urls(semaphore, session, urls, payloads, args.keyword)
 
 if __name__ == "__main__":
     banner = """
    ____                   ____           ___               
-  / __ \\____  ___  ____  / __ \\___  ____/ (_)_______  _  __
- / / / / __ \\/ _ \\/ __ \\/ /_/ / _ \\/ __  / / ___/ _ \\| |/_/
+  / __ \____  ___  ____  / __ \___  ____/ (_)_______  _  __
+ / / / / __ \/ _ \/ __ \/ /_/ / _ \/ __  / / ___/ _ \| |/_/
 / /_/ / /_/ /  __/ / / / _, _/  __/ /_/ / / /  /  __/>  <  
-\\____/ .___/\\___/_/ /_/_/ |_|\\___/\\__,_/_/_/   \\___/_/|_|  
+\____/ .___/\___/_/ /_/_/ |_|\___/\__,_/_/_/   \___/_/|_|  
     /_/                                                    
 
     """
@@ -144,7 +152,6 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--payloads', help='file of payloads', required=False)
     parser.add_argument('-k', '--keyword', help='keyword in urls to replace with payload (default is FUZZ)', default="FUZZ")
     parser.add_argument('-c', '--concurrency', help='number of concurrent tasks (default is 100)', type=int, default=100)
-    parser.add_argument('-u', '--url', help='URL to attack (default is https://testportal.helium.sh/redirect.php?url=FUZZ)', type=str, default='https://testportal.helium.sh/redirect.php?url=FUZZ')
     args = parser.parse_args()
     try:
         asyncio.run(main(args))
